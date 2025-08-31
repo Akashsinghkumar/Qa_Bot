@@ -16,9 +16,9 @@ services:
       - key: RENDER
         value: true
       - key: MODEL_URL
-        value: https://free-ollama-api.vercel.app/api/generate
+        value: https://api.ollama.ai/v1/generate
       - key: MODEL_NAME
-        value: gemma:2b
+        value: llama2
       - key: FLASK_ENV
         value: production
       - key: REQUEST_TIMEOUT

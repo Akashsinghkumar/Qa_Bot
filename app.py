@@ -100,12 +100,27 @@ class QABot:
         return True
 
     def ask_ollama(self, question):
-        payload = {
-            "model": CONFIG["MODEL_NAME"],
-            "prompt": question,
-            "stream": False,
-            "options": {"num_predict": 100}
-        }
+        # Check if using official Ollama API or local Ollama
+        if "api.ollama.ai" in CONFIG["MODEL_URL"]:
+            # Official Ollama API format
+            payload = {
+                "model": CONFIG["MODEL_NAME"],
+                "prompt": question,
+                "stream": False,
+                "options": {
+                    "num_predict": 100,
+                    "temperature": 0.7,
+                    "top_p": 0.9
+                }
+            }
+        else:
+            # Local Ollama format
+            payload = {
+                "model": CONFIG["MODEL_NAME"],
+                "prompt": question,
+                "stream": False,
+                "options": {"num_predict": 100}
+            }
         try:
             logging.info(f"🧠 Received question: {question}")
             response = requests.post(CONFIG["MODEL_URL"], json=payload)
@@ -300,28 +315,11 @@ def text_to_speech():
     output_path = "output.mp3"
     tts_lang = 'hi' if lang == 'hi' else 'en'
     try:
-        # Prefer gTTS to produce real MP3 for browser playback
+        # Use gTTS to produce real MP3 for browser playback
         tts = gTTS(text=text, lang=tts_lang)
         tts.save(output_path)
-    except Exception:
-        # Fallback to pyttsx3 (may produce WAV despite extension on some systems)
-        try:
-            engine = pyttsx3.init()
-            voices = engine.getProperty('voices')
-            for voice in voices:
-                name = (voice.name or "").lower()
-                languages = getattr(voice, 'languages', [])
-                joined_langs = " ".join([str(l).lower() for l in languages])
-                if tts_lang == 'hi' and ("hindi" in name or "hi" in joined_langs):
-                    engine.setProperty('voice', voice.id)
-                    break
-                if tts_lang == 'en' and ("english" in name or "en" in joined_langs):
-                    engine.setProperty('voice', voice.id)
-                    break
-            engine.save_to_file(text, output_path)
-            engine.runAndWait()
-        except Exception:
-            return jsonify({"error": "TTS failed"}), 500
+    except Exception as e:
+        return jsonify({"error": f"TTS failed: {str(e)}"}), 500
     return jsonify({"status": "ok", "audio_url": "/output.mp3", "answer": text})
 
 # --- Serve TTS audio ---
@@ -1363,15 +1361,27 @@ HISTORY_TEMPLATE = """
 
 if __name__ == "__main__":
     import os
-    port = int(os.environ.get("PORT", 5000))  # Render देगा PORT env var
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
-# Ensure the Tesseract OCR executable is in your PATH
-pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", "tesseract")
-# Ensure the TTS engine is properly configured
-pyttsx3.init()  
-# Ensure the Flask app is running with the correct configurations
-if not qa_bot.initialized:
-    qa_bot.initialize()
-# Ensure the database is initialized
-# (Database is already initialized by init_db() above)
+# Initialize app for production
+def init_production():
+    """Initialize app for production deployment"""
+    try:
+        # Set Tesseract path for production
+        if os.getenv('RENDER'):
+            pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+        
+        # Initialize database
+        init_db()
+        
+        # Initialize QA bot only if not in production (to avoid cold start issues)
+        if not os.getenv('RENDER'):
+            if not qa_bot.initialized:
+                qa_bot.initialize()
+                
+    except Exception as e:
+        logging.error(f"Production initialization failed: {e}")
+
+# Run initialization
+init_production()
