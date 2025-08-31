@@ -1361,9 +1361,10 @@ HISTORY_TEMPLATE = """
 </html>
 """
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 5000))  # Render देगा PORT env var
+    app.run(host="0.0.0.0", port=port)
 
 # Ensure the Tesseract OCR executable is in your PATH
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", "tesseract")
