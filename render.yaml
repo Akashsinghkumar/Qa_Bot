@@ -2,8 +2,10 @@ services:
   - type: web
     name: qa-bot
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --preload
     envVars:
       - key: PYTHON_VERSION
         value: 3.9.16
@@ -11,8 +13,24 @@ services:
         generateValue: true
       - key: TESSERACT_CMD
         value: /usr/bin/tesseract
+      - key: RENDER
+        value: true
+      - key: MODEL_URL
+        value: https://free-ollama-api.vercel.app/api/generate
+      - key: MODEL_NAME
+        value: gemma:2b
+      - key: FLASK_ENV
+        value: production
+      - key: REQUEST_TIMEOUT
+        value: "30"
+      - key: SPEECH_TIMEOUT
+        value: "10"
+      - key: GTTS_TIMEOUT
+        value: "30"
     buildFilter:
       paths:
         - app.py
         - requirements.txt
         - render.yaml
+        - Procfile
+        - runtime.txt

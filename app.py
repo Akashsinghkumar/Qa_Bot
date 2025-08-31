@@ -14,24 +14,49 @@ from typing import cast
 from io import BytesIO
 from PIL import Image
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Set Tesseract path based on environment
+if os.getenv('RENDER'):
+    # Render environment - use system path
+    pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+else:
+    # Local development - use Windows path
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 import re
 
 # --- Additional imports for PDF QA ---
-from langchain.chains import RetrievalQA
-from langchain_community.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
+try:
+    from langchain.chains import RetrievalQA
+    from langchain_community.vectorstores import FAISS
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain_community.document_loaders import PyPDFLoader
+    LANGCHAIN_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"LangChain dependencies not available: {e}")
+    LANGCHAIN_AVAILABLE = False
 
 # --- Configuration ---
 CONFIG = {
-    'MODEL_URL': "http://localhost:11434/api/generate",
-    'MODEL_NAME': "gemma:2b",
+    'MODEL_URL': os.getenv('MODEL_URL', "http://localhost:11434/api/generate"),
+    'MODEL_NAME': os.getenv('MODEL_NAME', "gemma:2b"),
     'MAX_CONTENT_LENGTH': 16 * 1024 * 1024,
     'THREAD_POOL_SIZE': 4,
     'TTS_LANGUAGE': 'en'
 }
+
+# Validate configuration for production
+def validate_config():
+    """Validate configuration for production deployment"""
+    if os.getenv('RENDER'):
+        if not CONFIG['MODEL_URL'] or CONFIG['MODEL_URL'] == "http://localhost:11434/api/generate":
+            logging.warning("⚠️ MODEL_URL not set - using localhost (will fail on Render)")
+        if not os.getenv('SECRET_KEY'):
+            logging.warning("⚠️ SECRET_KEY not set - using default (not secure for production)")
+    
+    logging.info(f"🔧 Configuration: MODEL_URL={CONFIG['MODEL_URL']}, MODEL_NAME={CONFIG['MODEL_NAME']}")
+
+# Run validation
+validate_config()
 
 # --- App Setup ---
 app = Flask(__name__)
@@ -107,7 +132,15 @@ class QABot:
         }
         try:
             logging.info(f"🧠 Received question: {question}")
-            response = requests.post(CONFIG["MODEL_URL"], json=payload)
+            
+            # Add timeout and better error handling for Render
+            timeout = int(os.getenv('REQUEST_TIMEOUT', 30))
+            response = requests.post(
+                CONFIG["MODEL_URL"], 
+                json=payload, 
+                timeout=timeout,
+                headers={'User-Agent': 'QABot/1.0'}
+            )
             response.raise_for_status()
             data = response.json()
             logging.info(f"📦 Model responded: {data.get('response')}")
@@ -126,8 +159,18 @@ class QABot:
                 logging.warning(f"⚠️ Could not save to database: {db_error}")
 
             return answer
+            
+        except requests.exceptions.Timeout:
+            logging.error("❌ Request timeout - Ollama service is slow or unreachable")
+            return "Sorry, the AI model is taking too long to respond. Please try again."
+        except requests.exceptions.ConnectionError:
+            logging.error("❌ Connection error - Cannot reach Ollama service")
+            return "Sorry, cannot connect to the AI service. Please check if Ollama is running."
+        except requests.exceptions.RequestException as e:
+            logging.error(f"❌ Request error: {e}")
+            return f"Sorry, there was an error communicating with the AI service: {str(e)}"
         except Exception as e:
-            logging.error(f"❌ Model error: {e}", exc_info=True)
+            logging.error(f"❌ Unexpected error: {e}", exc_info=True)
             return "Sorry, something went wrong with the model."
 
 qa_bot = QABot()
@@ -136,6 +179,30 @@ qa_bot = QABot()
 PDF_VECTORSTORES = {}  # Store per-user vectorstore
 
 # --- Routes ---
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Render"""
+    import datetime
+    
+    # Check if Ollama service is reachable
+    ollama_status = "unknown"
+    try:
+        if CONFIG['MODEL_URL'] != "http://localhost:11434/api/generate":
+            response = requests.get(CONFIG['MODEL_URL'].replace('/api/generate', '/api/tags'), timeout=5)
+            ollama_status = "healthy" if response.status_code == 200 else "unhealthy"
+        else:
+            ollama_status = "localhost (not accessible on Render)"
+    except Exception as e:
+        ollama_status = f"error: {str(e)}"
+    
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.datetime.now().isoformat(),
+        "ollama_status": ollama_status,
+        "model_name": CONFIG['MODEL_NAME'],
+        "environment": "production" if os.getenv('RENDER') else "development"
+    })
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -229,6 +296,9 @@ def ask():
 @app.route('/api/upload_pdf', methods=['POST'])
 @login_required
 def upload_pdf():
+    if not LANGCHAIN_AVAILABLE:
+        return jsonify({"error": "PDF processing not available on this deployment"}), 503
+    
     if 'pdf' not in request.files:
         return jsonify({"error": "No PDF uploaded"}), 400
     pdf_file = request.files['pdf']
@@ -277,6 +347,10 @@ def voice_to_text():
     # Language hint from client ("en" | "hi")
     lang_code = request.form.get('lang', 'en')
     stt_lang = 'hi-IN' if lang_code == 'hi' else 'en-US'
+    
+    # Set timeout for Google Speech Recognition
+    recognizer.operation_timeout = int(os.getenv('SPEECH_TIMEOUT', 10))
+    
     with sr.AudioFile(audio_file) as source:
         audio_data = recognizer.record(source)
         try:
@@ -284,28 +358,31 @@ def voice_to_text():
             return jsonify({'text': text})
         except sr.UnknownValueError:
             return jsonify({'error': 'Could not understand audio'}), 400
-        except sr.RequestError:
-            return jsonify({'error': 'Speech recognition service failed'}), 500
+        except sr.RequestError as e:
+            logging.error(f"Google Speech Recognition failed: {e}")
+            return jsonify({'error': 'Speech recognition service failed - please try again later'}), 500
+        except Exception as e:
+            logging.error(f"Unexpected error in speech recognition: {e}")
+            return jsonify({'error': 'Speech recognition failed'}), 500
 
 # --- Text-to-Speech Function ---
 def speak(text, lang='en'):
     """Convert text to speech using gTTS"""
     try:
         tts_lang = 'hi' if lang == 'hi' else 'en'
+        
+        # Add timeout for gTTS
+        import socket
+        socket.setdefaulttimeout(int(os.getenv('GTTS_TIMEOUT', 30)))
+        
         tts = gTTS(text=text, lang=tts_lang)
         tts.save("output.mp3")
-        
-        # Play audio based on operating system
-        import platform
-        if platform.system() == "Windows":
-            os.system("start output.mp3")
-        else:
-            # Linux/Mac
-            os.system("mpg123 output.mp3")
-            
         return True
+    except socket.timeout:
+        logging.error("gTTS timeout - Google TTS service is slow")
+        return False
     except Exception as e:
-        logging.error(f"TTS failed: {str(e)}")
+        logging.error(f"gTTS failed: {str(e)}")
         return False
 
 # --- Text-to-Speech Endpoint ---
@@ -1363,14 +1440,27 @@ HISTORY_TEMPLATE = """
 
 if __name__ == "__main__":
     import os
-    port = int(os.environ.get("PORT", 5000))  # Render देगा PORT env var
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
-# Ensure the Tesseract OCR executable is in your PATH
-pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", "tesseract")
-  
-# Ensure the Flask app is running with the correct configurations
-if not qa_bot.initialized:
-    qa_bot.initialize()
-# Ensure the database is initialized
-# (Database is already initialized by init_db() above)
+# Initialize app for production
+def init_production():
+    """Initialize app for production deployment"""
+    try:
+        # Set Tesseract path for production
+        if os.getenv('RENDER'):
+            pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+        
+        # Initialize database
+        init_db()
+        
+        # Initialize QA bot only if not in production (to avoid cold start issues)
+        if not os.getenv('RENDER'):
+            if not qa_bot.initialized:
+                qa_bot.initialize()
+                
+    except Exception as e:
+        logging.error(f"Production initialization failed: {e}")
+
+# Run initialization
+init_production()
