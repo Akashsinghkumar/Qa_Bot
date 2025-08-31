@@ -4,7 +4,6 @@ import requests
 import sqlite3
 import os
 import speech_recognition as sr
-import pyttsx3
 from gtts import gTTS
 from flask import Flask, request, render_template_string, jsonify, Response, redirect, url_for, session, flash, send_file
 from concurrent.futures import ThreadPoolExecutor
@@ -288,6 +287,27 @@ def voice_to_text():
         except sr.RequestError:
             return jsonify({'error': 'Speech recognition service failed'}), 500
 
+# --- Text-to-Speech Function ---
+def speak(text, lang='en'):
+    """Convert text to speech using gTTS"""
+    try:
+        tts_lang = 'hi' if lang == 'hi' else 'en'
+        tts = gTTS(text=text, lang=tts_lang)
+        tts.save("output.mp3")
+        
+        # Play audio based on operating system
+        import platform
+        if platform.system() == "Windows":
+            os.system("start output.mp3")
+        else:
+            # Linux/Mac
+            os.system("mpg123 output.mp3")
+            
+        return True
+    except Exception as e:
+        logging.error(f"TTS failed: {str(e)}")
+        return False
+
 # --- Text-to-Speech Endpoint ---
 @app.route('/api/tts', methods=['POST'])
 @login_required
@@ -297,32 +317,12 @@ def text_to_speech():
     lang = data.get("lang", "en")
     if not text:
         return jsonify({"error": "No text provided"}), 400
-    output_path = "output.mp3"
-    tts_lang = 'hi' if lang == 'hi' else 'en'
-    try:
-        # Prefer gTTS to produce real MP3 for browser playback
-        tts = gTTS(text=text, lang=tts_lang)
-        tts.save(output_path)
-    except Exception:
-        # Fallback to pyttsx3 (may produce WAV despite extension on some systems)
-        try:
-            engine = pyttsx3.init()
-            voices = engine.getProperty('voices')
-            for voice in voices:
-                name = (voice.name or "").lower()
-                languages = getattr(voice, 'languages', [])
-                joined_langs = " ".join([str(l).lower() for l in languages])
-                if tts_lang == 'hi' and ("hindi" in name or "hi" in joined_langs):
-                    engine.setProperty('voice', voice.id)
-                    break
-                if tts_lang == 'en' and ("english" in name or "en" in joined_langs):
-                    engine.setProperty('voice', voice.id)
-                    break
-            engine.save_to_file(text, output_path)
-            engine.runAndWait()
-        except Exception:
-            return jsonify({"error": "TTS failed"}), 500
-    return jsonify({"status": "ok", "audio_url": "/output.mp3", "answer": text})
+    
+    # Use the new speak function
+    if speak(text, lang):
+        return jsonify({"status": "ok", "audio_url": "/output.mp3", "answer": text})
+    else:
+        return jsonify({"error": "TTS failed"}), 500
 
 # --- Serve TTS audio ---
 @app.route('/output.mp3')
@@ -1368,8 +1368,7 @@ if __name__ == "__main__":
 
 # Ensure the Tesseract OCR executable is in your PATH
 pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD", "tesseract")
-# Ensure the TTS engine is properly configured
-pyttsx3.init()  
+  
 # Ensure the Flask app is running with the correct configurations
 if not qa_bot.initialized:
     qa_bot.initialize()
