@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: qa-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.16
+      - key: SECRET_KEY
+        generateValue: true
+      - key: TESSERACT_CMD
+        value: /usr/bin/tesseract
+    buildFilter:
+      paths:
+        - app.py
+        - requirements.txt
+        - render.yaml
